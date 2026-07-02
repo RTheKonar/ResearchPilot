@@ -69,8 +69,40 @@ Rather than treating the LLM as a static Q&A chatbot, ResearchPilot implements a
 
 ---
 
+## 🔌 Model Context Protocol (MCP) Server
+
+ResearchPilot features a built-in, fully-compliant **Model Context Protocol (MCP)** server. This allows external LLMs and clients (such as Claude Desktop or custom MCP clients) to seamlessly connect to your ResearchPilot instance and interact with the multi-agent research agent ecosystem.
+
+### 🌐 Connection Endpoints
+- **Server-Sent Events (SSE) Target (GET)**: `http://localhost:3000/sse`
+- **Client Messaging Route (POST)**: `http://localhost:3000/messages`
+- **Metadata Status API (GET)**: `/api/mcp-status`
+
+### 🛠️ Registered MCP Tools
+
+The built-in MCP server exposes standard schema tools, bridging external LLM clients with the systematic multi-agent research loop:
+
+1. **`list_projects`**
+   - **Description**: Retrieve a list of all research projects and literature synthesis topics.
+   - **Payload**: Returns project names, queries, status, timestamps, and paper counts.
+
+2. **`get_project`**
+   - **Description**: Fetch comprehensive details of a specific research project (including papers, comparison matrix, gap analysis, and final report).
+   - **Arguments**: `projectId` (string)
+
+3. **`create_research_project`**
+   - **Description**: Initialize and launch a systematic multi-agent literature search and synthesis workflow for a scientific query.
+   - **Arguments**: `query` (string), `projectId` (optional, to expand/continue existing projects)
+
+4. **`verify_integrity`**
+   - **Description**: Performs a cryptographically secure audit of the project logs.
+   - **Mechanism**: Re-computes the HMAC-SHA256 signature chain matching the secure logging ledger to verify that research records and agent logs have not been modified or tampered with.
+
+---
+
 ## ⚡ Key Features
 
+- **MCP Console Modal & Live Status**: Dedicated user interface to monitor registered schema tools, protocol version, and live Server-Sent Events (SSE) endpoints.
 - **Dynamic Interactive Node Graph**: Visualizes live multi-agent execution states in real-time, moving glow vectors across active nodes using smooth spring layouts.
 - **Agent Thought Monitor Logs**: Displays real-time, color-coded, cascading console streams from backend agents during literature crawl operations.
 - **Interactive Chronological Timeline**: Graphs the historic progression of discoveries with paper summaries and citation indices.
