@@ -1,0 +1,6 @@
+{
+  "name": "ResearchPilot",
+  "description": "An Agentic AI Research Companion for Literature Discovery, Analysis, and Knowledge Synthesis",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
