@@ -2,42 +2,40 @@
 
 > **An Agentic AI Research Companion for Literature Discovery, Analysis, and Knowledge Synthesis.**
 
-ResearchPilot is an autonomous multi-agent portfolio application built with TypeScript, Node.js (Express), and React (Vite). It uses **Gemini 2.5 Flash** via the `@google/genai` SDK to simulate a robust multi-agent systematic review loop that plans tasks, crawls literature metadata, parses documents virtually, cross-examines methodologies, scans research gaps, meta-reflects on depth, and generates publication-style literature review reports formatted with APA references.
+ResearchPilot is an autonomous multi-agent portfolio application built with TypeScript, Node.js (Express), and React (Vite). It uses **Gemini 2.5 Flash** via the `@google/genai` SDK to simulate a robust multi-agent systematic review loop that plans tasks, crawls literature metadata from public APIs, parses documents virtually, cross-examines methodologies, scans research gaps, meta-reflects on depth, and produces complete publishable APA reports.
 
 ---
 
 ## 🗺️ System Architecture
 
-Rather than treating the LLM as a static Q&A chatbot, ResearchPilot implements a state-machine multi-agent framework where each agent has single-responsibility isolation. The orchestration layer, powered by **LangGraph**, controls planning, sequencing, decision gates, and meta-reflection, while all external interactions (data fetching, document processing, database actions) are cleanly decoupled into **Model Context Protocol (MCP)** server tools.
-
-### 🔄 Multi-Agent Orchestration Flow (LangGraph)
+Rather than treating the LLM as a static Q&A chatbot, ResearchPilot implements a state-machine multi-agent framework where each agent has single-responsibility isolation:
 
 ```
                       [ User Research Query ]
                                  │
                                  ▼
                      ┌───────────────────────┐
-                     │     Planner Agent     │
+                     │     Planner Agent     │ <─── Recalls memory context (Memory Agent)
                      └───────────────────────┘
                                  │
                                  ▼
                      ┌───────────────────────┐
-                     │     Search Agent      │ ──┐
-                     └───────────────────────┘   │
-                                 │               │
-                                 ▼               │
-                     ┌───────────────────────┐   │  (Decoupled Tool Calls via
-                     │     Reading Agent     │   │   Model Context Protocol)
-                     └───────────────────────┘   │
-                                 │               │
-                                 ▼               │
-                     ┌───────────────────────┐   │
-                     │   Comparison Agent    │ <─┘
+                     │     Search Agent      │ <─── Crawls arXiv & Semantic Scholar APIs
                      └───────────────────────┘
                                  │
                                  ▼
                      ┌───────────────────────┐
-                     │  Research Gap Agent   │
+                     │     Reading Agent     │ <─── Performs deep extraction on abstract metadata
+                     └───────────────────────┘
+                                 │
+                                 ▼
+                     ┌───────────────────────┐
+                     │   Comparison Agent    │ <─── Compiles multi-column comparison table
+                     └───────────────────────┘
+                                 │
+                                 ▼
+                     ┌───────────────────────┐
+                     │  Research Gap Agent   │ <─── Scans open frontiers and methodological draw-backs
                      └───────────────────────┘
                                  │
                                  ▼
@@ -58,94 +56,21 @@ Rather than treating the LLM as a static Q&A chatbot, ResearchPilot implements a
                                                 [ Memory Buffer Commit ]
 ```
 
-### 🔌 Tool Decoupling Layer (Model Context Protocol)
-
-To ensure strict separation of concerns, the reasoning agents do not access external APIs or storage directly. Instead, they interact with the environment via specialized MCP servers:
-
-```
-                           LangGraph Orchestration
-                                      │
-     ┌────────────────────────────────┼────────────────────────────────┐
-     ▼                                ▼                                ▼
-┌─────────────────────────┐      ┌─────────────────────────┐      ┌─────────────────────────┐
-│  Academic Search MCP   │      │  Document Intell. MCP   │      │   Research Memory MCP   │
-│  - arXiv API Discovery  │      │  - PDF Extraction       │      │  - Semantic Retrieval   │
-│  - Semantic Scholar API │      │  - Document Chunking    │      │  - Embeddings & DB      │
-│  - Metadata Deduplication│     │  - Section Clean-up     │      │  - Project History      │
-└─────────────────────────┘      └─────────────────────────┘      └─────────────────────────┘
-```
-
 ### Agent Roles & Responsibilities
 
 1. **Planner Agent**: Analyzes the research objective and breaks it into 6 chronological execution objectives, customizing tasks for subsequent agents.
-2. **Search Agent**: Connects to the **Academic Search MCP** to discover relevant publications on arXiv and Semantic Scholar, rank relevancies, and deduplicate records.
-3. **Reading Agent**: Invokes the **Document Intelligence MCP** to extract structured information from abstracts and available metadata, generating standardized representations of research objectives, methodologies, datasets, evaluation metrics, and reported results.
-4. **Comparison Agent**: Analyzes parsed literature side-by-side to formulate a structured comparison matrix comparing strengths, weaknesses, and novel contributions.
+2. **Search Agent**: Connects directly to **arXiv** and **Semantic Scholar** APIs to discover publications, ranks relevance, and deduplicates records.
+3. **Reading Agent**: Extracts core architectural parameters from metadata (Problem statement, methodology, target models, benchmarks, and key results) and rates reading difficulty.
+4. **Comparison Agent**: Formulates a structured comparison matrix comparing strengths, weaknesses, and novel scientific contributions side-by-side.
 5. **Research Gap Agent**: Cross-scans parsed texts to identify unaddressed scientific problems, common limitations, conflicting results, and potential future directions.
-6. **Reflection Agent**: Evaluates coverage of the user's core concepts, verifies presence of methodologies, and compares paper density against query expectations to return a structured confidence score (0-100%). If coverage is insufficient, triggers an automated secondary literature discovery iteration.
-7. **Report Generator Agent**: Compiles final synthesis findings to generate publication-style literature review reports formatted with APA references.
-8. **Memory Agent**: Interfaces with the **Research Memory MCP** to stores completed research sessions, intermediate agent outputs, execution logs, and generated reports to support project continuity.
-
----
-
-## 💡 Why Model Context Protocol?
-
-ResearchPilot adopts the Model Context Protocol (MCP) to decouple AI reasoning from external tool execution. Rather than allowing the language model to invoke internal application logic directly, all tool interactions are exposed through a standardized protocol. This separation offers several advantages:
-
-* **Modularity** – New tools can be added without modifying the reasoning agents.
-* **Extensibility** – Additional academic databases or document processors can be integrated as independent MCP services.
-* **Interoperability** – Compatible external LLM clients can interact with ResearchPilot through a common interface.
-* **Security** – Only explicitly registered tools are accessible, reducing the attack surface available to the agent.
-
----
-
-## 🛡️ Security
-
-ResearchPilot follows the principles of secure agent design. Implemented safeguards include:
-
-* **Prompt Injection Detection**: Automatically scans incoming literature abstracts and queries for malicious prompt overrides.
-* **User Memory Isolation**: Segregates project files, parameters, and databases to ensure safe execution states.
-* **HMAC Integrity Verification**: Uses a cryptographically chained HMAC-SHA256 signature scheme on project activity logs to audit and detect unauthorized tampering.
-* **Structured Audit Logs**: Logs every agent transition, message signature, and tool call for full trace transparency.
-* **Least-Privilege Tool Exposure**: Minimizes tool permissions, strictly binding input types and isolating capabilities.
-* **Secure Environment Variable Management**: Excludes secrets from client bundles, using server-only environment configurations.
-
----
-
-## 🔌 Model Context Protocol (MCP) Server
-
-ResearchPilot exposes an MCP-compatible server interface that allows external MCP clients to invoke ResearchPilot's research workflows and retrieve project information.
-
-### 🌐 Connection Endpoints
-- **Server-Sent Events (SSE) Target (GET)**: `http://localhost:3000/sse`
-- **Client Messaging Route (POST)**: `http://localhost:3000/messages`
-- **Metadata Status API (GET)**: `/api/mcp-status`
-
-### 🛠️ Registered MCP Tools
-
-The built-in MCP server exposes standard schema tools, bridging external LLM clients with the systematic multi-agent research loop:
-
-1. **`list_projects`**
-   - **Description**: Retrieve a list of all research projects and literature synthesis topics.
-   - **Payload**: Returns project names, queries, status, timestamps, and paper counts.
-
-2. **`get_project`**
-   - **Description**: Fetch comprehensive details of a specific research project (including papers, comparison matrix, gap analysis, and final report).
-   - **Arguments**: `projectId` (string)
-
-3. **`create_research_project`**
-   - **Description**: Initialize and launch a systematic multi-agent literature search and synthesis workflow for a scientific query.
-   - **Arguments**: `query` (string), `projectId` (optional, to expand/continue existing projects)
-
-4. **`verify_integrity`**
-   - **Description**: Performs a cryptographically secure audit of the project logs.
-   - **Mechanism**: Re-computes the HMAC-SHA256 signature chain matching the secure logging ledger to verify that research records and agent logs have not been modified or tampered with.
+6. **Reflection Agent**: Evaluates coverage and assigns a quality confidence score (0-100%). If coverage is insufficient, triggers an automated secondary literature discovery iteration.
+7. **Report Generator Agent**: Compiles findings into a complete, portfolio-quality, publishable academic report.
+8. **Memory Agent**: Persists project states, logs, and generated assets in a lightweight database container so researchers can resume or review previous projects.
 
 ---
 
 ## ⚡ Key Features
 
-- **MCP Console Modal & Live Status**: Dedicated user interface to monitor registered schema tools, protocol version, and live Server-Sent Events (SSE) endpoints.
 - **Dynamic Interactive Node Graph**: Visualizes live multi-agent execution states in real-time, moving glow vectors across active nodes using smooth spring layouts.
 - **Agent Thought Monitor Logs**: Displays real-time, color-coded, cascading console streams from backend agents during literature crawl operations.
 - **Interactive Chronological Timeline**: Graphs the historic progression of discoveries with paper summaries and citation indices.
