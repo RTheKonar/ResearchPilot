@@ -41,10 +41,116 @@ export default function DashboardTabs({
   copySuccess
 }: DashboardTabsProps) {
   const [activeTab, setActiveTab] = useState<'synthesis' | 'comparison' | 'gaps' | 'timeline' | 'glossary' | 'bibliography' | 'security'>('synthesis');
+  const [citationStatus, setCitationStatus] = useState<{ isValid: boolean; results: any[] } | null>(null);
+  const [citationChecking, setCitationChecking] = useState(false);
+
+  React.useEffect(() => {
+    let active = true;
+    const fetchCitationVerification = async () => {
+      try {
+        setCitationChecking(true);
+        const res = await fetch(`/api/projects/${project.id}/verify-citations`);
+        if (res.ok) {
+          const data = await res.json();
+          if (active) {
+            setCitationStatus(data);
+          }
+        }
+      } catch (err) {
+        console.error("Failed to load citation verification report:", err);
+      } finally {
+        if (active) setCitationChecking(false);
+      }
+    };
+
+    fetchCitationVerification();
+    return () => {
+      active = false;
+    };
+  }, [project.id]);
 
   const { papers, comparison, gapAnalysis, report } = project;
 
   if (!report) return null;
+
+  const renderSuggestedReadingOrder = () => {
+    if (report.suggestedReadingOrderStructured && report.suggestedReadingOrderStructured.length > 0) {
+      return report.suggestedReadingOrderStructured.map((item, idx) => {
+        const paper = papers.find(p => p.id === item.paperId);
+        if (!paper) {
+          console.error(`Citation Verification Failed: suggestedReadingOrderStructured references paperId "${item.paperId}" which does not exist in project papers dataset.`);
+          return null; // Don't render incorrect or hallucinated papers
+        }
+        return (
+          <div key={idx} className="flex items-start space-x-3.5 bg-slate-50 border border-slate-200/60 p-4 rounded-lg hover:bg-slate-50 transition duration-150">
+            <div className="w-7 h-7 rounded bg-blue-100 flex items-center justify-center text-blue-700 font-bold text-xs shrink-0 mt-0.5">
+              {idx + 1}
+            </div>
+            <div className="space-y-1">
+              <h4 className="text-xs font-bold text-slate-800 leading-snug">
+                <a href={paper.url || '#'} target="_blank" rel="noopener noreferrer" className="hover:underline text-blue-600 inline-flex items-center gap-1">
+                  {paper.title}
+                </a>
+                <span className="text-slate-400 font-normal ml-1">
+                  ({paper.authors && paper.authors.length > 0 ? paper.authors[0] : 'Unknown'}, {paper.year})
+                </span>
+              </h4>
+              <p className="text-xs text-slate-500 font-medium leading-relaxed">
+                {item.reason}
+              </p>
+            </div>
+          </div>
+        );
+      });
+    }
+
+    // Fallback if structured data is missing (legacy compat)
+    return report.suggestedReadingOrder.map((item, idx) => (
+      <div key={idx} className="flex items-start space-x-3.5 bg-slate-50 border border-slate-200/60 p-4 rounded-lg hover:bg-slate-50 transition duration-150">
+        <div className="w-7 h-7 rounded bg-blue-100 flex items-center justify-center text-blue-700 font-bold text-xs shrink-0">
+          {idx + 1}
+        </div>
+        <p className="text-xs text-slate-600 font-semibold leading-relaxed">
+          {item}
+        </p>
+      </div>
+    ));
+  };
+
+  const renderPrimaryTakeaways = () => {
+    if (report.topPapersStructured && report.topPapersStructured.length > 0) {
+      return report.topPapersStructured.map((item, idx) => {
+        const paper = papers.find(p => p.id === item.paperId);
+        if (!paper) {
+          console.error(`Citation Verification Failed: topPapersStructured references paperId "${item.paperId}" which does not exist in project papers dataset.`);
+          return null; // Don't render incorrect or hallucinated papers
+        }
+        return (
+          <div key={idx} className="space-y-1">
+            <span className="text-[9px] font-bold uppercase text-slate-400">Paper {idx + 1} Takeaway</span>
+            <div className="text-xs text-slate-600 leading-relaxed font-medium bg-slate-50 p-3 rounded border border-slate-200 space-y-1.5">
+              <a href={paper.url || '#'} target="_blank" rel="noopener noreferrer" className="hover:underline text-blue-600 font-bold block leading-snug">
+                {paper.title}
+              </a>
+              <p className="text-slate-500 text-[11px] leading-relaxed">
+                {item.takeaway}
+              </p>
+            </div>
+          </div>
+        );
+      });
+    }
+
+    // Fallback if structured data is missing
+    return report.topPapers.map((takeaway, idx) => (
+      <div key={idx} className="space-y-1">
+        <span className="text-[9px] font-bold uppercase text-slate-400">Paper {idx + 1} Takeaway</span>
+        <p className="text-xs text-slate-600 leading-relaxed font-medium bg-slate-50 p-3 rounded border border-slate-200">
+          {takeaway}
+        </p>
+      </div>
+    ));
+  };
 
   return (
     <div className="space-y-6">
@@ -203,16 +309,7 @@ export default function DashboardTabs({
               <div className="space-y-4">
                 <h3 className="text-xs font-bold uppercase tracking-widest text-slate-400">Suggested Reading Roadmap</h3>
                 <div className="space-y-3">
-                  {report.suggestedReadingOrder.map((item, idx) => (
-                    <div key={idx} className="flex items-start space-x-3.5 bg-slate-50 border border-slate-200/60 p-4 rounded-lg hover:bg-slate-50 transition duration-150">
-                      <div className="w-7 h-7 rounded bg-blue-100 flex items-center justify-center text-blue-700 font-bold text-xs shrink-0">
-                        {idx + 1}
-                      </div>
-                      <p className="text-xs text-slate-600 font-semibold leading-relaxed">
-                        {item}
-                      </p>
-                    </div>
-                  ))}
+                  {renderSuggestedReadingOrder()}
                 </div>
               </div>
             </div>
@@ -226,14 +323,7 @@ export default function DashboardTabs({
                   Primary Literature Takeaways
                 </h3>
                 <div className="space-y-4">
-                  {report.topPapers.map((takeaway, idx) => (
-                    <div key={idx} className="space-y-1">
-                      <span className="text-[9px] font-bold uppercase text-slate-400">Paper {idx + 1} Takeaway</span>
-                      <p className="text-xs text-slate-600 leading-relaxed font-medium bg-slate-50 p-3 rounded border border-slate-200">
-                        {takeaway}
-                      </p>
-                    </div>
-                  ))}
+                  {renderPrimaryTakeaways()}
                 </div>
               </div>
 
@@ -453,14 +543,59 @@ export default function DashboardTabs({
 
         {/* TAB 6: BIBLIOGRAPHY */}
         {activeTab === 'bibliography' && (
-          <div className="bg-white rounded-xl p-6 border border-slate-200 shadow-sm">
-            <div className="flex items-center space-x-2.5 mb-6 border-b border-slate-200 pb-3">
-              <Bookmark className="w-5 h-5 text-blue-600" />
-              <div>
-                <h3 className="text-xs font-bold text-slate-800 uppercase tracking-widest">APA Bibliography</h3>
-                <p className="text-xs text-slate-400 mt-1">Export standard citations for your academic footnotes and references</p>
+          <div className="bg-white rounded-xl p-6 border border-slate-200 shadow-sm space-y-6">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-200 pb-3">
+              <div className="flex items-center space-x-2.5">
+                <Bookmark className="w-5 h-5 text-blue-600" />
+                <div>
+                  <h3 className="text-xs font-bold text-slate-800 uppercase tracking-widest">APA Bibliography</h3>
+                  <p className="text-xs text-slate-400 mt-1">Export standard citations for your academic footnotes and references</p>
+                </div>
               </div>
+
+              {citationStatus && (
+                <div className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-full text-[11px] font-bold self-start md:self-auto ${
+                  citationStatus.isValid 
+                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200/50' 
+                    : 'bg-amber-50 text-amber-700 border border-amber-200/50'
+                }`}>
+                  {citationStatus.isValid ? <ShieldCheck className="w-3.5 h-3.5" /> : <AlertTriangle className="w-3.5 h-3.5" />}
+                  <span>{citationStatus.isValid ? 'Citation Map Verified' : 'Citation Integrity Warnings'}</span>
+                </div>
+              )}
             </div>
+
+            {citationChecking && (
+              <div className="p-4 text-center bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-500 animate-pulse">
+                Auditing bibliography and verifying citation hyperlinks...
+              </div>
+            )}
+
+            {citationStatus && (
+              <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-3">
+                <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
+                  <Shield className="w-3.5 h-3.5 text-blue-600" />
+                  Citation & Bibliography Cryptographic Audit
+                </h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {citationStatus.results.map((r, idx) => (
+                    <div key={idx} className="flex items-start space-x-2.5 text-xs border-b border-slate-200/60 pb-2 last:border-0 last:pb-0">
+                      {r.status === 'PASSED' ? (
+                        <CheckCircle className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                      ) : r.status === 'WARNING' ? (
+                        <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0 mt-0.5" />
+                      ) : (
+                        <AlertTriangle className="w-3.5 h-3.5 text-rose-600 shrink-0 mt-0.5" />
+                      )}
+                      <div>
+                        <span className="font-bold text-slate-700 block">{r.test}</span>
+                        <span className="text-slate-500 text-[11px] block leading-relaxed">{r.message}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             <div className="p-6 bg-slate-50 border border-slate-200 rounded-lg relative font-mono text-[11px] text-slate-700 leading-relaxed whitespace-pre-wrap">
               {report.bibliography}

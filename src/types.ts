@@ -50,6 +50,12 @@ export interface ResearchPaper {
   citationCount: number;
   url: string;
   pdfUrl?: string;
+  venue?: string;
+  doi?: string;
+  arxivUrl?: string;
+  semanticScholarUrl?: string;
+  source?: string;
+  relevanceScore?: number;
   details?: PaperDetails;
   difficulty?: 'Beginner' | 'Intermediate' | 'Advanced';
   estReadingTime?: number;
@@ -96,8 +102,10 @@ export interface ResearchReport {
   objective: string;
   executiveSummary: string;
   topPapers: string[];
+  topPapersStructured?: { paperId: string; takeaway: string; }[];
   methodologicalTrends: string;
   suggestedReadingOrder: string[];
+  suggestedReadingOrderStructured?: { paperId: string; reason: string; }[];
   futureResearchDirections: string[];
   glossary: GlossaryItem[];
   bibliography: string;

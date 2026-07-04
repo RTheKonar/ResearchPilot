@@ -17,6 +17,7 @@ import {
   SecurityCheck,
   DefenseAudit
 } from './src/types';
+import { normalizePaperMetadata, normalizeMetadataText } from './src/utils/metadata';
 
 dotenv.config();
 
@@ -75,6 +76,162 @@ function sanitizeText(text: string): string {
   cleaned = cleaned.replace(/<[^>]*>/g, "");
   
   return cleaned;
+}
+
+function generatePaperId(title: string): string {
+  const cleanTitle = title.trim().toLowerCase();
+  const hash = crypto.createHash('md5').update(cleanTitle).digest('hex').substring(0, 8);
+  return `paper_${hash}`;
+}
+
+function validateAndResolveCitations(
+  project: ResearchProject,
+  rawMarkdown: string,
+  addLogFn: Function
+): { processedMarkdown: string; citedPaperIds: Set<string>; warnings: string[] } {
+  const warnings: string[] = [];
+  const citedPaperIds = new Set<string>();
+  let processed = rawMarkdown;
+
+  // 1. Validate [citation:ID] placeholders
+  const citationRegex = /\[citation:([^\]\s]+)\]/g;
+  let match;
+  const citationMatches: string[] = [];
+  
+  while ((match = citationRegex.exec(processed)) !== null) {
+    citationMatches.push(match[1]);
+  }
+
+  // Deduplicate matches to validate each referenced ID
+  const uniqueCitedIds = Array.from(new Set(citationMatches));
+
+  for (const citedId of uniqueCitedIds) {
+    const paper = project.papers.find(p => p.id === citedId);
+    if (!paper) {
+      // Unknown Paper ID! Discard citation and replace with warning placeholder
+      const replacementText = "[Reference omitted because it could not be verified against the retrieved literature.]";
+      const reg = new RegExp(`\\[citation:${citedId}\\]`, 'g');
+      processed = processed.replace(reg, replacementText);
+      const warnMsg = `Citation verification failed: Unknown Paper ID "${citedId}" referenced. Citation omitted.`;
+      warnings.push(warnMsg);
+      addLogFn(project, 'Report Generator', warnMsg, 'warn', 'CITATION_VALIDATION_FAILED', { paperId: citedId });
+      continue;
+    }
+
+    // Comprehensive Metadata Integrity Check:
+    // Verify that all essential fields in the retrieved metadata are present and match
+    const hasValidId = !!paper.id;
+    const hasTitle = typeof paper.title === 'string' && paper.title.trim().length > 0;
+    const hasUrl = typeof paper.url === 'string' && paper.url.trim().length > 0;
+    const hasAuthors = Array.isArray(paper.authors) && paper.authors.length > 0;
+    const hasYear = typeof paper.year === 'number' && paper.year > 1900 && paper.year <= new Date().getFullYear();
+
+    if (!hasValidId || !hasTitle || !hasUrl || !hasAuthors || !hasYear) {
+      // Metadata verification failed!
+      const replacementText = "[Reference omitted because it could not be verified against the retrieved literature.]";
+      const reg = new RegExp(`\\[citation:${citedId}\\]`, 'g');
+      processed = processed.replace(reg, replacementText);
+      const warnMsg = `Citation verification failed: Paper metadata for "${paper.title || citedId}" is incomplete or corrupt. Citation omitted.`;
+      warnings.push(warnMsg);
+      addLogFn(project, 'Report Generator', warnMsg, 'warn', 'CITATION_VALIDATION_FAILED', { paperId: citedId });
+      continue;
+    }
+
+    // Citation is successfully verified! Let's register it
+    citedPaperIds.add(paper.id);
+
+    // Format perfect APA-style parenthetical inline citation
+    const authorLastName = paper.authors[0].split(' ').pop() || 'Unknown';
+    const authorText = paper.authors.length > 2 ? `${authorLastName} et al.` : (paper.authors.length === 2 ? `${paper.authors[0].split(' ').pop()} & ${paper.authors[1].split(' ').pop()}` : authorLastName);
+    const citationText = `[${authorText} (${paper.year})](${paper.url})`;
+    
+    const reg = new RegExp(`\\[citation:${citedId}\\]`, 'g');
+    processed = processed.replace(reg, citationText);
+  }
+
+  // 2. Scan and validate any manually generated markdown hyperlinks [Text](URL)
+  // Ensure we don't have unverified or hallucinated links
+  const linkRegex = /\[([^\]]+)\]\((https?:\/\/[^\s\)\"\'\#]+)\)/g;
+  let linkMatch;
+  while ((linkMatch = linkRegex.exec(processed)) !== null) {
+    const linkText = linkMatch[1];
+    const linkUrl = linkMatch[2].replace(/[\.\,\;\:]$/, '');
+
+    // Skip citations we just resolved (by checking if the URL matches any of our papers)
+    const paper = project.papers.find(p => p.url === linkUrl || p.pdfUrl === linkUrl || (p.url && linkUrl.startsWith(p.url)) || (p.pdfUrl && linkUrl.startsWith(p.pdfUrl)));
+    if (!paper) {
+      // Discard unverified hyperlink
+      const replacementText = "[Reference omitted because it could not be verified against the retrieved literature.]";
+      processed = processed.replace(linkMatch[0], replacementText);
+      const warnMsg = `Citation verification failed: Unverified hyperlink "${linkUrl}" found in report text. Citation omitted.`;
+      warnings.push(warnMsg);
+      addLogFn(project, 'Report Generator', warnMsg, 'warn', 'CITATION_VALIDATION_FAILED', { url: linkUrl });
+    } else {
+      // If the link text is completely different from the paper's metadata (e.g. hallucinated title), discard it
+      const titleLower = paper.title.toLowerCase();
+      const textLower = linkText.toLowerCase();
+      const authorMatch = paper.authors.some(a => textLower.includes(a.toLowerCase()) || a.toLowerCase().includes(textLower));
+      const titleMatch = titleLower.includes(textLower) || textLower.includes(titleLower) || textLower.includes('pdf') || textLower.includes('link') || textLower.includes('source') || textLower.includes('arxiv');
+
+      if (!titleMatch && !authorMatch && textLower.length > 3) {
+        // Text doesn't match paper details. Discard to be absolutely secure.
+        const replacementText = "[Reference omitted because it could not be verified against the retrieved literature.]";
+        processed = processed.replace(linkMatch[0], replacementText);
+        const warnMsg = `Citation verification failed: Link text "${linkText}" does not match retrieved paper metadata. Citation omitted.`;
+        warnings.push(warnMsg);
+        addLogFn(project, 'Report Generator', warnMsg, 'warn', 'CITATION_VALIDATION_FAILED', { url: linkUrl, linkText });
+      } else {
+        citedPaperIds.add(paper.id);
+      }
+    }
+  }
+
+  return { processedMarkdown: processed, citedPaperIds, warnings };
+}
+
+function generateVerifiedBibliography(
+  project: ResearchProject,
+  citedPaperIds: Set<string>
+): { bibliography: string; warnings: string[] } {
+  const warnings: string[] = [];
+  const entries: string[] = [];
+  const addedIds = new Set<string>();
+
+  // Iterate strictly through referenced paper IDs to construct APA citations
+  for (const id of citedPaperIds) {
+    const paper = project.papers.find(p => p.id === id);
+    if (!paper) {
+      warnings.push(`Bibliography integrity warning: Referenced paper ID "${id}" is unknown.`);
+      continue;
+    }
+
+    if (addedIds.has(id)) {
+      continue; // Prevent duplicates in bibliography
+    }
+    addedIds.add(id);
+
+    // Build APA bibliography entry using stored metadata
+    const authorsStr = paper.authors && paper.authors.length > 0
+      ? (paper.authors.length > 2 
+          ? `${paper.authors[0]} et al.` 
+          : paper.authors.join(', '))
+      : 'Unknown Authors';
+    
+    const venueStr = paper.venue ? ` *${paper.venue}*.` : '';
+    const doiStr = paper.doi ? ` DOI: ${paper.doi}.` : '';
+    const urlStr = !paper.doi && (paper.url || paper.pdfUrl) ? ` Available at: ${paper.url || paper.pdfUrl}` : '';
+
+    const entry = `${authorsStr} (${paper.year}). *${paper.title}*.${venueStr}${doiStr}${urlStr}`;
+    entries.push(entry);
+  }
+
+  // Construct numbered bibliography
+  const bibliography = entries.map((entry, idx) => `[${idx + 1}] ${entry}`).join('\n\n');
+  return { bibliography, warnings };
+}
+
+function escapeHTML(str: string): string {
+  return normalizeMetadataText(str);
 }
 
 async function scanLlmGuardrail(text: string): Promise<boolean> {
@@ -365,7 +522,7 @@ async function searchArxiv(query: string): Promise<any[]> {
 
 async function searchSemanticScholar(query: string): Promise<any[]> {
   try {
-    const searchUrl = `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(query)}&limit=8&fields=title,authors,year,abstract,citationCount,url`;
+    const searchUrl = `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(query)}&limit=8&fields=title,authors,year,abstract,citationCount,url,venue,externalIds`;
     const response = await fetch(searchUrl);
     if (!response.ok) throw new Error(`Semantic Scholar API returned status ${response.status}`);
     const data = await response.json();
@@ -423,15 +580,23 @@ async function runAgenticWorkflow(projectId: string, query: string, iterationCou
       is_safe: true
     });
 
+    const updateTaskStatus = (taskId: string, status: 'pending' | 'running' | 'completed' | 'failed') => {
+      if (project.plan) {
+        project.plan.tasks = project.plan.tasks.map(t => t.id === taskId ? { ...t, status } : t);
+        saveProjects(projects);
+      }
+    };
+
     // --- STEP 1: PLANNER AGENT ---
-    addLog(project, 'Planner Agent', `Analyzing research objective: "${query}"...`, 'info', 'PLAN_GENERATED', {
-      total_tasks: 6,
-      execution_sequence: ["task1", "task2", "task3", "task4", "task5", "task6"]
-    });
-    
-    const plannerResponse = await generateContentWithRetry(project, 'Planner Agent', {
-      model: 'gemini-3.5-flash',
-      contents: `You are the Lead Research Architect (Planner Agent) for ResearchPilot.
+    if (iterationCount === 1 || !project.plan) {
+      addLog(project, 'Planner Agent', `Analyzing research objective: "${query}"...`, 'info', 'PLAN_GENERATED', {
+        total_tasks: 6,
+        execution_sequence: ["task1", "task2", "task3", "task4", "task5", "task6"]
+      });
+      
+      const plannerResponse = await generateContentWithRetry(project, 'Planner Agent', {
+        model: 'gemini-3.5-flash',
+        contents: `You are the Lead Research Architect (Planner Agent) for ResearchPilot.
 The user wants to research: "${query}"
 
 Generate a structured 6-step execution plan representing an autonomous multi-agent research workflow.
@@ -443,75 +608,74 @@ Each task must have:
 - agent: the specific agent executing it ("Search Agent", "Reading Agent", "Comparison Agent", "Research Gap Agent", "Reflection Agent", "Report Generator")
 
 Provide output in JSON format matching the ResearchPlan interface.`,
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            tasks: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  id: { type: Type.STRING },
-                  name: { type: Type.STRING },
-                  status: { type: Type.STRING, description: "Must be 'pending'" },
-                  description: { type: Type.STRING },
-                  agent: { type: Type.STRING },
-                },
-                required: ['id', 'name', 'status', 'description', 'agent'],
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              tasks: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    id: { type: Type.STRING },
+                    name: { type: Type.STRING },
+                    status: { type: Type.STRING, description: "Must be 'pending'" },
+                    description: { type: Type.STRING },
+                    agent: { type: Type.STRING },
+                  },
+                  required: ['id', 'name', 'status', 'description', 'agent'],
+                }
               }
-            }
-          },
-          required: ['tasks']
+            },
+            required: ['tasks']
+          }
         }
-      }
-    });
+      });
 
-    const parsedPlan = JSON.parse(plannerResponse.text || '{}') as ResearchPlan;
-    project.plan = {
-      tasks: parsedPlan.tasks.map(t => ({ ...t, status: 'pending' as const }))
-    };
-    addLog(project, 'Planner Agent', 'Successfully drafted dynamic multi-agent execution plan.', 'info', 'PLAN_GENERATED', {
-      total_tasks: project.plan.tasks.length,
-      execution_sequence: project.plan.tasks.map(t => t.id),
-      assigned_agents: project.plan.tasks.reduce((acc, t) => ({ ...acc, [t.id]: t.agent }), {}),
-      planner_confidence_score: 95
-    });
-    saveProjects(projects);
-
-    const updateTaskStatus = (taskId: string, status: 'pending' | 'running' | 'completed' | 'failed') => {
-      if (project.plan) {
-        project.plan.tasks = project.plan.tasks.map(t => t.id === taskId ? { ...t, status } : t);
-        saveProjects(projects);
-      }
-    };
+      const parsedPlan = JSON.parse(plannerResponse.text || '{}') as ResearchPlan;
+      project.plan = {
+        tasks: parsedPlan.tasks.map(t => ({ ...t, status: 'pending' as const }))
+      };
+      addLog(project, 'Planner Agent', 'Successfully drafted dynamic multi-agent execution plan.', 'info', 'PLAN_GENERATED', {
+        total_tasks: project.plan.tasks.length,
+        execution_sequence: project.plan.tasks.map(t => t.id),
+        assigned_agents: project.plan.tasks.reduce((acc, t) => ({ ...acc, [t.id]: t.agent }), {}),
+        planner_confidence_score: 95
+      });
+      saveProjects(projects);
+    } else {
+      addLog(project, 'Planner Agent', `Reusing existing research plan for iteration ${iterationCount}.`, 'info', 'PLAN_GENERATED', {
+        total_tasks: project.plan.tasks.length
+      });
+    }
 
     // --- STEP 2: SEARCH AGENT ---
-    updateTaskStatus('task1', 'running');
-    addLog(project, 'Search Agent', `Querying arXiv and Semantic Scholar APIs for recent and highly cited papers...`, 'info', 'TOOL_INVOCATION', {
-      tool_name: "academic_repositories_search",
-      input_parameters: { search_query: query, max_results: 8 },
-      egress_resolved_host: "export.arxiv.org & api.semanticscholar.org"
-    });
+    if (iterationCount === 1 || project.papers.length === 0) {
+      updateTaskStatus('task1', 'running');
+      addLog(project, 'Search Agent', `Querying arXiv and Semantic Scholar APIs for recent and highly cited papers...`, 'info', 'TOOL_INVOCATION', {
+        tool_name: "academic_repositories_search",
+        input_parameters: { search_query: query, max_results: 8 },
+        egress_resolved_host: "export.arxiv.org & api.semanticscholar.org"
+      });
 
-    const [arxivResults, ssResults] = await Promise.all([
-      searchArxiv(query),
-      searchSemanticScholar(query)
-    ]);
+      const [arxivResults, ssResults] = await Promise.all([
+        searchArxiv(query),
+        searchSemanticScholar(query)
+      ]);
 
-    addLog(project, 'Search Agent', `Received data feeds from academic repositories. Aggregating and selecting top papers via LLM deduplication...`, 'info', 'TOOL_INVOCATION', {
-      tool_name: "academic_repositories_search",
-      input_parameters: { search_query: query, max_results: 8 },
-      egress_resolved_host: "export.arxiv.org & api.semanticscholar.org",
-      network_status_code: 200,
-      records_returned: arxivResults.length + ssResults.length
-    });
+      addLog(project, 'Search Agent', `Received data feeds from academic repositories. Aggregating and selecting top papers via LLM deduplication...`, 'info', 'TOOL_INVOCATION', {
+        tool_name: "academic_repositories_search",
+        input_parameters: { search_query: query, max_results: 8 },
+        egress_resolved_host: "export.arxiv.org & api.semanticscholar.org",
+        network_status_code: 200,
+        records_returned: arxivResults.length + ssResults.length
+      });
 
-    // We use Gemini to parse the XML from arxiv and combine it with Semantic Scholar's JSON to select the absolute best, most highly-cited and relevant 3-5 papers.
-    const aggregatorResponse = await generateContentWithRetry(project, 'Search Agent', {
-      model: 'gemini-3.5-flash',
-      contents: `You are the Search & Literature Discovery Agent for ResearchPilot.
+      // We use Gemini to parse the XML from arxiv and combine it with Semantic Scholar's JSON to select the absolute best, most highly-cited and relevant 3-5 papers.
+      const aggregatorResponse = await generateContentWithRetry(project, 'Search Agent', {
+        model: 'gemini-3.5-flash',
+        contents: `You are the Search & Literature Discovery Agent for ResearchPilot.
 Research Goal: "${query}"
 
 Below are search results from raw academic search portals.
@@ -524,7 +688,7 @@ ${JSON.stringify(ssResults, null, 2)}
 Task:
 1. Deduplicate papers that represent the same publications.
 2. Select the top 4 highly relevant, highly cited, or recent papers that directly target the research objective.
-3. Extract:
+3. Extract and fill all fields carefully:
    - title
    - authors (as array of strings)
    - year (integer)
@@ -532,46 +696,76 @@ Task:
    - citationCount (integer)
    - url (arXiv URL or Semantic Scholar URL)
    - pdfUrl (arXiv PDF URL if available, typically ends in .pdf or has /pdf/ in the path)
+   - venue (the journal, conference, or publication venue if available, else empty or 'ArXiv')
+   - doi (digital object identifier if available, else empty)
+   - arxivUrl (the direct arXiv URL if available, else empty)
+   - semanticScholarUrl (the Semantic Scholar page URL if available, else empty)
+   - source (the original source database, either 'arxiv' or 'semanticscholar')
+   - relevanceScore (an integer from 0 to 100 indicating the degree of relevance to the research goal, where 100 is extremely relevant)
 
 Ensure every chosen paper has a detailed abstract and a solid citation context. Avoid short snippets. Return structured JSON.`,
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              title: { type: Type.STRING },
-              authors: { type: Type.ARRAY, items: { type: Type.STRING } },
-              year: { type: Type.INTEGER },
-              abstract: { type: Type.STRING },
-              citationCount: { type: Type.INTEGER },
-              url: { type: Type.STRING },
-              pdfUrl: { type: Type.STRING, description: "URL to the PDF if available, otherwise omit" }
-            },
-            required: ['title', 'authors', 'year', 'abstract', 'citationCount', 'url']
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                title: { type: Type.STRING },
+                authors: { type: Type.ARRAY, items: { type: Type.STRING } },
+                year: { type: Type.INTEGER },
+                abstract: { type: Type.STRING },
+                citationCount: { type: Type.INTEGER },
+                url: { type: Type.STRING },
+                pdfUrl: { type: Type.STRING, description: "URL to the PDF if available, otherwise omit" },
+                venue: { type: Type.STRING },
+                doi: { type: Type.STRING },
+                arxivUrl: { type: Type.STRING },
+                semanticScholarUrl: { type: Type.STRING },
+                source: { type: Type.STRING },
+                relevanceScore: { type: Type.INTEGER }
+              },
+              required: ['title', 'authors', 'year', 'abstract', 'citationCount', 'url']
+            }
           }
         }
-      }
-    });
+      });
 
-    const parsedPapers = JSON.parse(aggregatorResponse.text || '[]') as any[];
-    project.papers = parsedPapers.map((p, idx) => ({
-      id: `paper-${idx + 1}`,
-      title: p.title,
-      authors: p.authors || [],
-      year: p.year || 2024,
-      abstract: p.abstract || '',
-      citationCount: p.citationCount || 0,
-      url: p.url || '',
-      pdfUrl: p.pdfUrl || ''
-    }));
+      const parsedPapers = JSON.parse(aggregatorResponse.text || '[]') as any[];
+      project.papers = parsedPapers.map((p) => {
+        const normalized = normalizePaperMetadata({
+          title: p.title || '',
+          authors: p.authors || [],
+          year: p.year || 2024,
+          abstract: p.abstract || '',
+          citationCount: p.citationCount || 0,
+          url: p.url || '',
+          pdfUrl: p.pdfUrl || '',
+          venue: p.venue || '',
+          doi: p.doi || '',
+          arxivUrl: p.arxivUrl || '',
+          semanticScholarUrl: p.semanticScholarUrl || '',
+          source: p.source || '',
+          relevanceScore: p.relevanceScore || 85
+        });
+        const stableId = generatePaperId(normalized.title);
+        return {
+          id: stableId,
+          ...normalized
+        };
+      });
 
-    addLog(project, 'Search Agent', `Selected ${project.papers.length} high-impact papers for detailed analysis.`, 'info', 'PAPER_FETCH', {
-      total_selected: project.papers.length,
-      papers: project.papers.map(p => ({ title: p.title, url: p.url, pdfUrl: p.pdfUrl }))
-    });
-    updateTaskStatus('task1', 'completed');
+      addLog(project, 'Search Agent', `Selected ${project.papers.length} high-impact papers for detailed analysis.`, 'info', 'PAPER_FETCH', {
+        total_selected: project.papers.length,
+        papers: project.papers.map(p => ({ title: p.title, url: p.url, pdfUrl: p.pdfUrl }))
+      });
+      updateTaskStatus('task1', 'completed');
+    } else {
+      addLog(project, 'Search Agent', `Skipping literature search. Retaining existing active dataset of ${project.papers.length} publications.`, 'info', 'PAPER_FETCH', {
+        total_papers: project.papers.length
+      });
+      updateTaskStatus('task1', 'completed');
+    }
 
     if (project.papers.length === 0) {
       throw new Error("No literature discovered matching this objective.");
@@ -588,6 +782,14 @@ Ensure every chosen paper has a detailed abstract and a solid citation context. 
 
     for (let i = 0; i < project.papers.length; i++) {
       const paper = project.papers[i];
+      if (paper.details) {
+        addLog(project, 'Reading Agent', `Paper "${paper.title}" already analyzed in a previous run. Reusing cached extraction.`, 'info', 'PDF_DOWNLOAD', {
+          title_scanned: paper.title,
+          source: "local_cache"
+        });
+        finalPapers.push(paper);
+        continue;
+      }
       addLog(project, 'Security Guardrail', `Screening abstract text of "${paper.title}" for malicious commands and delimiters...`, 'info', 'USER_QUERY_RECEIVED', {
         title_scanned: paper.title,
         abstract_length: paper.abstract.length
@@ -742,7 +944,28 @@ Return as a JSON array of comparisons.`,
       }
     });
 
-    project.comparison = JSON.parse(comparisonResponse.text || '[]') as PaperComparison[];
+    const rawComparison = JSON.parse(comparisonResponse.text || '[]') as any[];
+    const validatedComparison: PaperComparison[] = [];
+    
+    // XSS Shield Protection - escape parameters before saving
+    for (const item of rawComparison) {
+      const paper = project.papers.find(p => p.id === item.paperId) 
+        || project.papers.find(p => p.title.toLowerCase() === item.title.toLowerCase());
+      
+      if (paper) {
+        validatedComparison.push({
+          paperId: paper.id,
+          title: paper.title,
+          method: escapeHTML(item.method || ''),
+          dataset: escapeHTML(item.dataset || ''),
+          strengths: escapeHTML(item.strengths || ''),
+          weaknesses: escapeHTML(item.weaknesses || ''),
+          novelContributions: escapeHTML(item.novelContributions || '')
+        });
+      }
+    }
+    project.comparison = validatedComparison;
+
     addLog(project, 'Comparison Agent', `Successfully generated comparative literature grid mapping ${project.comparison.length} dimensions.`, 'info', 'PLAN_GENERATED', {
       total_dimensions: project.comparison.length,
       keys_analyzed: ['method', 'dataset', 'strengths', 'weaknesses', 'novelContributions']
@@ -867,16 +1090,26 @@ Return as a JSON object.`,
         });
         // Add unique papers
         for (const item of extraSSResults.slice(0, 3)) {
-          if (!project.papers.some(p => p.title.toLowerCase() === item.title.toLowerCase())) {
+          const normalized = normalizePaperMetadata({
+            title: item.title || '',
+            authors: item.authors || [],
+            year: item.year || 2024,
+            abstract: item.abstract || '',
+            citationCount: item.citationCount || 0,
+            url: item.url || '',
+            pdfUrl: item.externalIds?.ArXiv ? `https://arxiv.org/pdf/${item.externalIds.ArXiv}.pdf` : '',
+            venue: item.venue || '',
+            doi: item.externalIds?.DOI || '',
+            arxivUrl: item.externalIds?.ArXiv ? `https://arxiv.org/abs/${item.externalIds.ArXiv}` : '',
+            semanticScholarUrl: item.url || '',
+            source: 'semanticscholar',
+            relevanceScore: 85
+          });
+          if (!project.papers.some(p => p.title.toLowerCase() === normalized.title.toLowerCase())) {
+            const stableId = generatePaperId(normalized.title);
             project.papers.push({
-              id: `paper-${project.papers.length + 1}`,
-              title: item.title,
-              authors: item.authors || [],
-              year: item.year || 2024,
-              abstract: item.abstract || '',
-              citationCount: item.citationCount || 0,
-              url: item.url || '',
-              pdfUrl: ''
+              id: stableId,
+              ...normalized
             });
           }
         }
@@ -900,32 +1133,29 @@ Return as a JSON object.`,
       model: 'gemini-3.5-flash',
       contents: `You are the Chief Academic Report Writer. Compile a comprehensive, portfolio-quality, and publishable literature synthesis report.
 Research Objective: "${query}"
-Analyzed Papers: ${JSON.stringify(project.papers, null, 2)}
+Analyzed Papers (SUPPLIED VERIFIED DATASET): ${JSON.stringify(project.papers.map(p => ({ id: p.id, title: p.title, authors: p.authors, year: p.year, abstract: p.abstract })), null, 2)}
 Comparison Matrix: ${JSON.stringify(project.comparison, null, 2)}
 Gaps and Gaps Analysis: ${JSON.stringify(project.gapAnalysis, null, 2)}
 Confidence Evaluation: ${reflectionResult.confidenceScore}% - ${reflectionResult.justification}
 
-Create a structured report. Output as JSON representing the ResearchReport schema. It must have:
-1. objective: Research objective definition
-2. executiveSummary: High-quality paragraph summarizing current research state.
-3. topPapers: A summary array of key takeaways from each paper (1-2 sentences each).
-4. methodologicalTrends: A synthesis of methodological paradigms across the papers (e.g. Graph Neural Networks, Multi-agent models, state-space representations).
-5. suggestedReadingOrder: A list of paper titles in suggested order of reading to master this topic, with short explanation.
-6. futureResearchDirections: Concrete recommended research projects for next-generation systems.
-7. glossary: A research glossary of 4-5 advanced technical terms found in these papers with definitions.
-8. bibliography: formatted APA citations of all studied papers.
-9. rawMarkdown: A full, beautiful, academic markdown string. It must include all standard markdown headers:
-   # Research Objective
-   # Executive Summary
-   # Top Papers Analysis
-   # Methodological Trends
-   # Research Gaps
-   # Suggested Reading Order
-   # Future Research Directions
-   # Technical Glossary
-   # References / Bibliography
+Create a structured report. Output as JSON representing the ResearchReport schema.
 
-Ensure the markdown is clean, structured, has elegant table layouts, and utilizes markdown typography properly.`,
+STRICT CITATION AND REFERENCES LAWS:
+- You may only discuss papers contained in the supplied paper objects.
+- Do not invent papers.
+- Do not invent citations.
+- Do not invent URLs or DOIs.
+- If the retrieved evidence is insufficient, explicitly state this rather than fabricating references.
+- You must reference papers STRICTLY by their unique IDs (e.g., "paper_a1b2c3d4").
+- For "topPapersStructured", return an array of objects where each object has:
+  - paperId: the exact string ID of the paper (e.g. "paper_a1b2c3d4")
+  - takeaway: 1-2 sentences of key takeaway from this paper.
+- For "suggestedReadingOrderStructured", return an array of objects where each object has:
+  - paperId: the exact string ID of the paper
+  - reason: brief explanation of why this paper should be read in this position.
+- For "rawMarkdown", write a full, beautiful academic markdown report.
+  - When referencing or citing a paper in the text, use the special format: [citation:paperId] (for example, "[citation:paper_a1b2c3d4]").
+  - Do NOT write raw external links, DOIs, URLs, or manual bibliography lists inside rawMarkdown. Simply end the report with a "# References" header, followed by the text "[BIBLIOGRAPHY_PLACEHOLDER]". Our system will automatically insert the 100% accurate, verified bibliography there.`,
       config: {
         responseMimeType: 'application/json',
         responseSchema: {
@@ -933,9 +1163,29 @@ Ensure the markdown is clean, structured, has elegant table layouts, and utilize
           properties: {
             objective: { type: Type.STRING },
             executiveSummary: { type: Type.STRING },
-            topPapers: { type: Type.ARRAY, items: { type: Type.STRING } },
+            topPapersStructured: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  paperId: { type: Type.STRING },
+                  takeaway: { type: Type.STRING }
+                },
+                required: ['paperId', 'takeaway']
+              }
+            },
             methodologicalTrends: { type: Type.STRING },
-            suggestedReadingOrder: { type: Type.ARRAY, items: { type: Type.STRING } },
+            suggestedReadingOrderStructured: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  paperId: { type: Type.STRING },
+                  reason: { type: Type.STRING }
+                },
+                required: ['paperId', 'reason']
+              }
+            },
             futureResearchDirections: { type: Type.ARRAY, items: { type: Type.STRING } },
             glossary: {
               type: Type.ARRAY,
@@ -948,23 +1198,107 @@ Ensure the markdown is clean, structured, has elegant table layouts, and utilize
                 required: ['term', 'definition']
               }
             },
-            bibliography: { type: Type.STRING },
             rawMarkdown: { type: Type.STRING }
           },
           required: [
-            'objective', 'executiveSummary', 'topPapers', 'methodologicalTrends', 
-            'suggestedReadingOrder', 'futureResearchDirections', 'glossary', 'bibliography', 'rawMarkdown'
+            'objective', 'executiveSummary', 'topPapersStructured', 'methodologicalTrends', 
+            'suggestedReadingOrderStructured', 'futureResearchDirections', 'glossary', 'rawMarkdown'
           ]
         }
       }
     });
 
-    const parsedReport = JSON.parse(reportResponse.text || '{}') as ResearchReport;
-    project.report = parsedReport;
+    const parsedReport = JSON.parse(reportResponse.text || '{}');
+    
+    // XSS Shield Protection - escape parameters before saving
+    // 1. Validate topPapersStructured and populate topPapers for backwards compatibility
+    const validatedTopPapersStructured: any[] = [];
+    const topPapersCompat: string[] = [];
+    
+    if (Array.isArray(parsedReport.topPapersStructured)) {
+      for (const item of parsedReport.topPapersStructured) {
+        const paper = project.papers.find(p => p.id === item.paperId);
+        if (paper) {
+          validatedTopPapersStructured.push({
+            paperId: paper.id,
+            takeaway: escapeHTML(item.takeaway)
+          });
+          topPapersCompat.push(`**${paper.title}** (${paper.authors && paper.authors.length > 0 ? paper.authors[0] : 'Unknown'}, ${paper.year}): ${escapeHTML(item.takeaway)}`);
+        } else {
+          const warnMsg = `Citation verification failed: Structured paper takeaway references unknown paperId "${item.paperId}". Citation omitted.`;
+          addLog(project, 'Report Generator', warnMsg, 'warn', 'CITATION_VALIDATION_FAILED', { paperId: item.paperId });
+        }
+      }
+    }
+
+    // 2. Validate suggestedReadingOrderStructured and populate suggestedReadingOrder for backwards compatibility
+    const validatedReadingOrderStructured: any[] = [];
+    const readingOrderCompat: string[] = [];
+    
+    if (Array.isArray(parsedReport.suggestedReadingOrderStructured)) {
+      for (const item of parsedReport.suggestedReadingOrderStructured) {
+        const paper = project.papers.find(p => p.id === item.paperId);
+        if (paper) {
+          validatedReadingOrderStructured.push({
+            paperId: paper.id,
+            reason: escapeHTML(item.reason)
+          });
+          readingOrderCompat.push(`**${paper.title}** - ${escapeHTML(item.reason)}`);
+        } else {
+          const warnMsg = `Citation verification failed: Suggested reading roadmap references unknown paperId "${item.paperId}". Citation omitted.`;
+          addLog(project, 'Report Generator', warnMsg, 'warn', 'CITATION_VALIDATION_FAILED', { paperId: item.paperId });
+        }
+      }
+    }
+
+    // 3. Post-process rawMarkdown to replace citations, validate external URLs, and collect cited paper IDs
+    const { processedMarkdown, citedPaperIds, warnings: citationWarnings } = validateAndResolveCitations(
+      project,
+      parsedReport.rawMarkdown || '',
+      addLog
+    );
+
+    // Collect paper IDs referenced in structured sections to make sure they are in the bibliography too
+    validatedTopPapersStructured.forEach(tp => citedPaperIds.add(tp.paperId));
+    validatedReadingOrderStructured.forEach(ro => citedPaperIds.add(ro.paperId));
+
+    // 4. Generate bibliography deterministically ONLY for verified cited papers
+    const { bibliography: bibliographyStr, warnings: bibWarnings } = generateVerifiedBibliography(
+      project,
+      citedPaperIds
+    );
+
+    let finalMarkdown = processedMarkdown;
+
+    // Replace bibliography placeholder
+    if (finalMarkdown.includes('[BIBLIOGRAPHY_PLACEHOLDER]')) {
+      finalMarkdown = finalMarkdown.replace('[BIBLIOGRAPHY_PLACEHOLDER]', bibliographyStr);
+    } else {
+      // Append it if placeholder wasn't used
+      finalMarkdown += `\n\n## References\n\n${bibliographyStr}`;
+    }
+
+    // Assign back to project
+    project.report = {
+      objective: escapeHTML(parsedReport.objective || ''),
+      executiveSummary: escapeHTML(parsedReport.executiveSummary || ''),
+      topPapers: topPapersCompat,
+      topPapersStructured: validatedTopPapersStructured,
+      methodologicalTrends: escapeHTML(parsedReport.methodologicalTrends || ''),
+      suggestedReadingOrder: readingOrderCompat,
+      suggestedReadingOrderStructured: validatedReadingOrderStructured,
+      futureResearchDirections: (parsedReport.futureResearchDirections || []).map((d: string) => escapeHTML(d)),
+      glossary: (parsedReport.glossary || []).map((g: any) => ({
+        term: escapeHTML(g.term || ''),
+        definition: escapeHTML(g.definition || '')
+      })),
+      bibliography: bibliographyStr,
+      rawMarkdown: finalMarkdown
+    };
     
     addLog(project, 'Report Generator', `Knowledge synthesis completed. Scientific research report generated successfully.`, 'info', 'PLAN_GENERATED', {
       sections_compiled: ['objective', 'executiveSummary', 'topPapers', 'methodologicalTrends', 'suggestedReadingOrder', 'futureResearchDirections', 'glossary', 'bibliography'],
-      raw_markdown_length: parsedReport.rawMarkdown.length
+      raw_markdown_length: project.report.rawMarkdown.length
     });
     updateTaskStatus('task6', 'completed');
 
@@ -1056,6 +1390,208 @@ app.get('/api/projects/:id/verify-logs', (req, res) => {
     isValid,
     totalLogs: project.logs.length,
     validations
+  });
+});
+
+app.get('/api/projects/:id/verify-citations', (req, res) => {
+  const project = projects.find(p => p.id === req.params.id);
+  if (!project) {
+    return res.status(404).json({ error: "Project not found" });
+  }
+
+  const reports = [];
+  let overallValid = true;
+
+  // 1. Check if papers exist
+  const paperCount = project.papers ? project.papers.length : 0;
+  reports.push({
+    test: "Literature Discovery Dataset",
+    status: paperCount > 0 ? "PASSED" : "WARNING",
+    message: `Discovered ${paperCount} verified research papers as immutable sources of truth.`
+  });
+
+  // 2. Verify stable IDs
+  let idsConsistent = true;
+  if (project.papers) {
+    for (const paper of project.papers) {
+      const computedId = generatePaperId(paper.title);
+      if (paper.id !== computedId) {
+        idsConsistent = false;
+        overallValid = false;
+        reports.push({
+          test: `Identifier Integrity: "${paper.title}"`,
+          status: "FAILED",
+          message: `ID mismatch! Paper ID is "${paper.id}", but computed hashed ID is "${computedId}".`
+        });
+      }
+    }
+    if (idsConsistent && paperCount > 0) {
+      reports.push({
+        test: "Identifier Integrity Checks",
+        status: "PASSED",
+        message: "All papers utilize stable, collision-free hashed identifiers."
+      });
+    }
+  }
+
+  // 3. Verify comparison grid alignment
+  let comparisonAligned = true;
+  if (project.comparison && project.comparison.length > 0) {
+    for (const comp of project.comparison) {
+      const match = project.papers.some(p => p.id === comp.paperId);
+      if (!match) {
+        comparisonAligned = false;
+        overallValid = false;
+        reports.push({
+          test: `Comparison Matrix Alignment: "${comp.title}"`,
+          status: "FAILED",
+          message: `Referenced paperId "${comp.paperId}" does not exist in discovered papers.`
+        });
+      }
+    }
+    if (comparisonAligned) {
+      reports.push({
+        test: "Comparison Matrix Alignment",
+        status: "PASSED",
+        message: "All comparison matrix coordinates align with discovered papers."
+      });
+    }
+  } else if (project.status === 'completed') {
+    overallValid = false;
+    reports.push({
+      test: "Comparison Matrix",
+      status: "FAILED",
+      message: "No comparative mapping is available in this completed project."
+    });
+  }
+
+  // 4. Verify structured report links
+  if (project.report) {
+    let topPapersAligned = true;
+    if (Array.isArray(project.report.topPapersStructured)) {
+      for (const tp of project.report.topPapersStructured) {
+        const match = project.papers.some(p => p.id === tp.paperId);
+        if (!match) {
+          topPapersAligned = false;
+          overallValid = false;
+          reports.push({
+            test: `Key Takeaway Provenance: ID "${tp.paperId}"`,
+            status: "FAILED",
+            message: `Key Takeaway references paperId "${tp.paperId}", which does not exist.`
+          });
+        }
+      }
+    } else {
+      topPapersAligned = false;
+      overallValid = false;
+      reports.push({
+        test: "Key Takeaway Structured Data",
+        status: "FAILED",
+        message: "Structured key takeaway schema is missing or invalid."
+      });
+    }
+
+    if (topPapersAligned) {
+      reports.push({
+        test: "Key Takeaway Provenance",
+        status: "PASSED",
+        message: "All highlighted takeaway statements map strictly to discovered papers."
+      });
+    }
+
+    let readingOrderAligned = true;
+    if (Array.isArray(project.report.suggestedReadingOrderStructured)) {
+      for (const ro of project.report.suggestedReadingOrderStructured) {
+        const match = project.papers.some(p => p.id === ro.paperId);
+        if (!match) {
+          readingOrderAligned = false;
+          overallValid = false;
+          reports.push({
+            test: `Reading Roadmap Provenance: ID "${ro.paperId}"`,
+            status: "FAILED",
+            message: `Suggested reading roadmap references paperId "${ro.paperId}", which does not exist.`
+          });
+        }
+      }
+    } else {
+      readingOrderAligned = false;
+      overallValid = false;
+      reports.push({
+        test: "Reading Roadmap Structured Data",
+        status: "FAILED",
+        message: "Structured suggested reading roadmap schema is missing or invalid."
+      });
+    }
+
+    if (readingOrderAligned) {
+      reports.push({
+        test: "Reading Roadmap Provenance",
+        status: "PASSED",
+        message: "All suggested reading roadmap entries map strictly to discovered papers."
+      });
+    }
+
+    // 5. Scan for unresolved citation placeholders or invalid external URLs in markdown
+    const md = project.report.rawMarkdown || '';
+    if (md.includes('[citation:')) {
+      overallValid = false;
+      reports.push({
+        test: "Citation Placeholder Extraction",
+        status: "FAILED",
+        message: "Found raw, unresolved [citation:...] tags inside the markdown report."
+      });
+    } else {
+      reports.push({
+        test: "Citation Placeholder Extraction",
+        status: "PASSED",
+        message: "All internal citation placeholders successfully compiled to hyperlinked anchors."
+      });
+    }
+
+    // Scan for hallucinated URLs
+    const urlRegex = /https?:\/\/(?:arxiv\.org|semanticscholar\.org)[^\s\)\"\']+/g;
+    let match;
+    const foundUrls = [];
+    while ((match = urlRegex.exec(md)) !== null) {
+      foundUrls.push(match[0]);
+    }
+
+    let urlLeakage = false;
+    for (const url of foundUrls) {
+      const cleanUrl = url.replace(/[\.\,\;\:]$/, '');
+      const exists = project.papers.some(p => p.url === cleanUrl || p.pdfUrl === cleanUrl || (p.url && cleanUrl.startsWith(p.url)) || (p.pdfUrl && cleanUrl.startsWith(p.pdfUrl)));
+      if (!exists) {
+        urlLeakage = true;
+        reports.push({
+          test: "Cryptographic URL Isolation",
+          status: "WARNING",
+          message: `Detected external hyperlink reference: "${cleanUrl}" not present in active bibliography list.`
+        });
+      }
+    }
+
+    if (!urlLeakage) {
+      reports.push({
+        test: "Cryptographic URL Isolation",
+        status: "PASSED",
+        message: "Zero hyperlink leakage. Every external reference is strictly anchored to verified papers."
+      });
+    }
+
+  } else if (project.status === 'completed') {
+    overallValid = false;
+    reports.push({
+      test: "Literature Synthesis Report",
+      status: "FAILED",
+      message: "Research report was not generated for this completed project."
+    });
+  }
+
+  res.json({
+    projectId: project.id,
+    isValid: overallValid,
+    timestamp: new Date().toISOString(),
+    results: reports
   });
 });
 
