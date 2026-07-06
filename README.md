@@ -2,7 +2,7 @@
 
 > **An Agentic AI Research Companion for Literature Discovery, Analysis, and Knowledge Synthesis.**
 
-ResearchPilot is an autonomous multi-agent portfolio application built with TypeScript, Node.js (Express), and React (Vite). It uses **Gemini 2.5 Flash** via the `@google/genai` SDK to simulate a robust multi-agent systematic review loop that plans tasks, crawls literature metadata, parses documents virtually, cross-examines methodologies, scans research gaps, meta-reflects on depth, and generates publication-style literature review reports formatted with APA references.
+ResearchPilot is an autonomous multi-agent portfolio application built with TypeScript, Node.js (Express), and React (Vite). It uses **Gemini 3.5 Flash** via the `@google/genai` SDK to simulate a robust multi-agent systematic review loop that plans tasks, crawls literature metadata, parses documents virtually, cross-examines methodologies, scans research gaps, meta-reflects on depth, and generates publication-style literature review reports formatted with APA references.
 
 ---
 
